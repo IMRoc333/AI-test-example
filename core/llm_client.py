@@ -1,9 +1,9 @@
 import google.generativeai as genai
-import streamlit as st
 import json
 import re
 import sys
 import os
+from functools import lru_cache
 
 # 确保能引用到 config
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -23,7 +23,7 @@ def get_available_models(api_key, provider="gemini", base_url=None):
             return []
     return get_gemini_available_models(api_key)
 
-@st.cache_data(ttl=3600)
+@lru_cache(maxsize=16)
 def get_gemini_available_models(api_key):
     """动态获取当前Key可用的所有Chat模型"""
     if not is_valid_api_key(api_key):

@@ -4,10 +4,10 @@ import pandas as pd
 
 from config.settings import is_valid_api_key
 from core.agent_runner import TestCaseAgent, normalize_cases_data
+from core.export_utils import dataframe_to_markdown
 from core.llm_client import extract_json_from_text
 from core.openai_compatible import OpenAICompatibleClient
 from core.rag_engine import RAGEngine, TextSplitter
-from ui.components import dataframe_to_markdown
 
 
 class CoreFixesTest(unittest.TestCase):
