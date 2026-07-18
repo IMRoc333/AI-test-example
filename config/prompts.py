@@ -84,8 +84,62 @@ class PromptManager:
 4. 直接输出清洗后的纯文本。
 """
 
+    REQUIREMENT_ANALYSIS_SYSTEM_PROMPT = """
+你是一名资深测试分析师，负责把不规范、口语化或信息不完整的 PRD 转成可确认的测试分析结构。
+
+必须只输出合法 JSON 对象，不要输出 Markdown、标题或解释文字。
+输出结构必须包含：
+{
+  "summary": "一句话概括需求",
+  "actors": ["角色"],
+  "core_flows": ["核心业务流程"],
+  "business_rules": ["明确业务规则"],
+  "modules": [
+    {
+      "name": "模块名",
+      "test_points": ["测试点"],
+      "risks": ["风险点"]
+    }
+  ],
+  "missing_questions": ["需要人工确认的问题"],
+  "assumptions": ["AI 基于经验做出的假设，必须可人工确认"]
+}
+
+要求：
+1. PRD 明确写出的内容放入 business_rules。
+2. PRD 没写清楚但测试必须关注的内容放入 missing_questions，不要当成已确定规则。
+3. modules 应围绕业务对象和用户流程组织，适合作为后续测试用例生成的模块树。
+4. assumptions 必须标注为假设，不得和明确规则混淆。
+"""
+
     @staticmethod
-    def get_initial_prompt(prd_text, rag_text=""):
+    def get_requirement_analysis_prompt(prd_text, rag_text=""):
+        prompt = f"""
+请分析以下 PRD，生成需求结构化结果和测试模块树。
+
+PRD：
+{prd_text}
+"""
+        if rag_text:
+            prompt += f"""
+
+参考知识库/历史用例：
+{rag_text}
+"""
+        prompt += """
+
+请严格输出合法 JSON 对象。不要输出 Markdown 或解释文字。
+"""
+        return prompt
+
+    @staticmethod
+    def get_initial_prompt(prd_text, rag_text="", analysis_context=None):
+        import json
+
+        analysis_text = ""
+        if analysis_context:
+            analysis_text = json.dumps(analysis_context, ensure_ascii=False, indent=2) if isinstance(analysis_context, (dict, list)) else str(analysis_context)
+
         prompt = f"""
 请根据以下 PRD 生成测试用例。
 
@@ -94,9 +148,16 @@ class PromptManager:
 2. 知识库/历史用例只允许补充测试设计方法、风险点和相似缺陷经验，不能改变本次业务主题。
 3. 如果参考资料与 PRD 不一致或不相关，请直接忽略参考资料。
 4. 不要为知识库文档、模型接口、API 配置、平台自身功能生成测试用例，除非这些内容明确出现在 PRD 中。
+5. 如果提供了“用户确认后的需求分析/模块树”，必须优先按确认模块生成用例。
 
 PRD：
 {prd_text}
+"""
+        if analysis_text:
+            prompt += f"""
+
+用户确认后的需求分析/模块树：
+{analysis_text}
 """
         if rag_text:
             prompt += f"""
@@ -155,3 +216,32 @@ PRD：
     @staticmethod
     def get_rag_filter_prompt(query, chunks_text):
         return PromptManager.RAG_FILTER_PROMPT.format(query=query[:2000], chunks=chunks_text)
+
+    @staticmethod
+    def get_rule_suggestion_prompt(prd_text, report, trace, cases):
+        import json
+
+        return f"""
+请根据 Agent 优化结果，提炼可沉淀到知识库的测试规则。
+
+PRD：
+{prd_text}
+
+最终评估报告：
+{json.dumps(report, ensure_ascii=False, indent=2)}
+
+Agent 执行轨迹：
+{json.dumps(trace, ensure_ascii=False, indent=2)}
+
+最终测试用例：
+{json.dumps(cases, ensure_ascii=False, indent=2)}
+
+输出要求：
+1. 只输出合法 JSON 数组。
+2. 每条规则包含 scene, rule, source, confidence。
+3. scene 是业务场景，例如“优惠券”“登录”“支付”。
+4. rule 是可复用的测试经验，不要写成具体用例步骤。
+5. source 固定写“AI 评估 + Agent 优化”。
+6. confidence 只能是 high、medium、low。
+7. 最多输出 5 条；如果没有值得沉淀的规则，输出空数组 []。
+"""

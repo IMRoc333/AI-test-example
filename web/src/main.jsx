@@ -99,6 +99,10 @@ function App() {
   const [sources, setSources] = useState([])
   const [report, setReport] = useState(null)
   const [trace, setTrace] = useState([])
+  const [requirementAnalysis, setRequirementAnalysis] = useState(null)
+  const [analysisDraft, setAnalysisDraft] = useState('')
+  const [analysisConfirmed, setAnalysisConfirmed] = useState(false)
+  const [suggestedRules, setSuggestedRules] = useState([])
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
@@ -128,11 +132,27 @@ function App() {
 
   const progress = useMemo(() => ([
     { name: 'PRD 输入', done: Boolean(prdText.trim()) },
+    { name: '需求分析', done: Boolean(requirementAnalysis) },
+    { name: '人工确认', done: analysisConfirmed },
     { name: '用例生成', done: cases.length > 0 },
-    { name: '质量评估', done: Boolean(report) },
-    { name: 'Agent 优化', done: trace.length > 0 },
-    { name: '结果导出', done: false },
-  ]), [prdText, cases.length, report, trace.length])
+    { name: '评估优化', done: Boolean(report) || trace.length > 0 },
+    { name: '规则沉淀', done: suggestedRules.length > 0 },
+  ]), [prdText, requirementAnalysis, analysisConfirmed, cases.length, report, trace.length, suggestedRules.length])
+
+  function resetAnalysisState() {
+    setRequirementAnalysis(null)
+    setAnalysisDraft('')
+    setAnalysisConfirmed(false)
+    setSuggestedRules([])
+  }
+
+  function updatePrdText(value) {
+    setPrdText(value)
+    setCases([])
+    setReport(null)
+    setTrace([])
+    resetAnalysisState()
+  }
 
   function updateConfig(key, value) {
     setConfig((prev) => ({ ...prev, [key]: value }))
@@ -175,11 +195,51 @@ function App() {
     form.append('enableVision', String(enableVisionParse))
     try {
       const data = await requestJson('/api/parse-file', { method: 'POST', body: form })
-      setPrdText(data.text)
+      updatePrdText(data.text)
     } catch (err) {
       setError(err.message)
     } finally {
       setBusy('')
+    }
+  }
+
+  async function analyzeRequirement() {
+    setError('')
+    setNotice('')
+    setBusy('需求分析')
+    setReport(null)
+    setTrace([])
+    setCases([])
+    setSuggestedRules([])
+    try {
+      const data = await requestJson('/api/analyze-requirement', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ config, prdText, useKb, useHistory }),
+      })
+      const analysis = data.analysis || {}
+      setRequirementAnalysis(analysis)
+      setAnalysisDraft(JSON.stringify(analysis, null, 2))
+      setAnalysisConfirmed(false)
+      setRagContext(data.ragContext || '')
+      setSources(data.sources || [])
+      setNotice('需求分析已完成，请确认模块树后再生成用例')
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  function confirmAnalysis() {
+    setError('')
+    try {
+      const parsed = JSON.parse(analysisDraft)
+      setRequirementAnalysis(parsed)
+      setAnalysisConfirmed(true)
+      setNotice('模块树已确认，可以生成测试用例')
+    } catch {
+      setError('需求分析 JSON 格式不正确，请修正后再确认。')
     }
   }
 
@@ -189,11 +249,16 @@ function App() {
     setBusy('生成用例')
     setReport(null)
     setTrace([])
+    setSuggestedRules([])
     try {
+      let analysisContext = requirementAnalysis
+      if (analysisDraft.trim()) {
+        analysisContext = JSON.parse(analysisDraft)
+      }
       const data = await requestJson('/api/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ config, prdText, useKb, useHistory }),
+        body: JSON.stringify({ config, prdText, useKb, useHistory, analysisContext }),
       })
       const nextCases = data.cases || []
       setCases(nextCases)
@@ -240,10 +305,33 @@ function App() {
       const nextCases = data.cases || []
       const nextReport = data.report || null
       const nextTrace = data.trace || []
+      const nextRules = data.suggestedRules || []
       setCases(nextCases)
       setReport(nextReport)
       setTrace(nextTrace)
+      setSuggestedRules(nextRules)
       saveLocalHistory('Agent 自动优化', nextCases, nextReport, nextTrace)
+      if (nextRules.length) setNotice(`Agent 已提炼 ${nextRules.length} 条可沉淀规则，可保存到知识库`)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function saveSuggestedRules() {
+    setError('')
+    setNotice('')
+    setBusy('沉淀规则')
+    try {
+      const data = await requestJson('/api/rules/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ config, rules: suggestedRules, sourcePrd: prdText }),
+      })
+      setNotice(`已沉淀到知识库：${data.count} 条规则`)
+      setSuggestedRules([])
+      if (kbCollection === 'knowledge') await refreshKb('knowledge')
     } catch (err) {
       setError(err.message)
     } finally {
@@ -331,10 +419,11 @@ function App() {
   }
 
   function loadDemo() {
-    setPrdText('用户可以使用手机号验证码登录。验证码 5 分钟内有效。连续 5 次输入错误后，登录能力冻结 10 分钟。登录成功后进入首页。未注册手机号会自动创建新账号。')
+    updatePrdText('用户可以使用手机号验证码登录。验证码 5 分钟内有效。连续 5 次输入错误后，登录能力冻结 10 分钟。登录成功后进入首页。未注册手机号会自动创建新账号。')
     setCases(sampleCases)
     setReport(null)
     setTrace([])
+    setSuggestedRules([])
     setError('')
     setNotice('')
   }
@@ -344,6 +433,7 @@ function App() {
     setCases(item.cases || [])
     setReport(item.report || null)
     setTrace(item.trace || [])
+    resetAnalysisState()
     setView('workbench')
   }
 
@@ -405,7 +495,8 @@ function App() {
             <div className="actions">
               <button onClick={() => setView('settings')}>切换模型</button>
               <button onClick={loadDemo}>载入示例</button>
-              <button className="primary" onClick={generate} disabled={busy || !prdText}>生成用例</button>
+              <button onClick={analyzeRequirement} disabled={busy || !prdText}>需求分析</button>
+              <button className="primary" onClick={generate} disabled={busy || !prdText || !analysisConfirmed}>生成用例</button>
             </div>
           )}
         </header>
@@ -422,7 +513,7 @@ function App() {
                   <h3>PRD 输入</h3>
                   <label className="upload">上传文件<input type="file" accept=".txt,.md,.pdf,.png,.jpg,.jpeg,.webp" onChange={(e) => e.target.files?.[0] && parseFile(e.target.files[0])} /></label>
                 </div>
-                <textarea value={prdText} onChange={(e) => setPrdText(e.target.value)} placeholder="粘贴 PRD 文本，或上传 txt / md / pdf / UI 图片。PDF 或图片含原型图时，可开启多模态解析。" />
+                <textarea value={prdText} onChange={(e) => updatePrdText(e.target.value)} placeholder="粘贴 PRD 文本，或上传 txt / md / pdf / UI 图片。PDF 或图片含原型图时，可开启多模态解析。" />
               </div>
 
               <div className="card score-card">
@@ -442,9 +533,20 @@ function App() {
               </div>
             </section>
 
+            <RequirementAnalysisPanel
+              analysis={requirementAnalysis}
+              draft={analysisDraft}
+              setDraft={setAnalysisDraft}
+              confirmed={analysisConfirmed}
+              onAnalyze={analyzeRequirement}
+              onConfirm={confirmAnalysis}
+              busy={busy}
+              disabled={!prdText}
+            />
+
             <section className="grid lower">
               <CasesPanel cases={cases} busy={busy} />
-              <TracePanel trace={trace} sources={sources} />
+              <TracePanel trace={trace} sources={sources} suggestedRules={suggestedRules} onSaveRules={saveSuggestedRules} busy={busy} />
             </section>
           </>
         )}
@@ -534,6 +636,65 @@ function SettingsView({ config, updateConfig, resetConfig, saveConfigNow }) {
   )
 }
 
+function RequirementAnalysisPanel({ analysis, draft, setDraft, confirmed, onAnalyze, onConfirm, busy, disabled }) {
+  const modules = Array.isArray(analysis?.modules) ? analysis.modules : []
+  const questions = Array.isArray(analysis?.missing_questions) ? analysis.missing_questions : []
+  const rules = Array.isArray(analysis?.business_rules) ? analysis.business_rules : []
+
+  return (
+    <section className="card analysis-card">
+      <div className="card-head">
+        <div>
+          <h3>需求结构化 / 模块树确认</h3>
+          <p>先把不规范 PRD 转成测试模块树，人工确认后再生成用例。</p>
+        </div>
+        <div className="actions">
+          <button onClick={onAnalyze} disabled={busy || disabled}>重新分析</button>
+          <button className="primary" onClick={onConfirm} disabled={busy || !draft}>确认模块树</button>
+        </div>
+      </div>
+
+      {!analysis && <p className="empty">点击“需求分析”后，这里会展示模块、测试点、缺失问题和 AI 假设。</p>}
+
+      {analysis && (
+        <div className="analysis-grid">
+          <div className="analysis-preview">
+            <div className={`confirm-banner ${confirmed ? 'confirmed' : ''}`}>
+              {confirmed ? '已确认：生成用例会优先使用这份模块树' : '待确认：请检查模块树和缺失问题'}
+            </div>
+            <p className="analysis-summary">{analysis.summary || '暂无摘要'}</p>
+
+            <h4>测试模块</h4>
+            <div className="module-list">
+              {modules.map((module, index) => (
+                <div className="module-item" key={`${module.name || 'module'}-${index}`}>
+                  <b>{module.name || `模块 ${index + 1}`}</b>
+                  <div className="tag-row">
+                    {(module.test_points || []).map((point) => <span key={point}>{point}</span>)}
+                  </div>
+                  {Array.isArray(module.risks) && module.risks.length > 0 && (
+                    <p>风险：{module.risks.join('、')}</p>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            <h4>明确规则</h4>
+            <ul className="compact-list">{rules.map((rule) => <li key={rule}>{rule}</li>)}</ul>
+
+            <h4>待确认问题</h4>
+            <ul className="compact-list warning-list">{questions.map((question) => <li key={question}>{question}</li>)}</ul>
+          </div>
+          <div className="analysis-editor">
+            <label>可编辑 JSON</label>
+            <textarea value={draft} onChange={(e) => setDraft(e.target.value)} />
+          </div>
+        </div>
+      )}
+    </section>
+  )
+}
+
 function CasesPanel({ cases, busy }) {
   return (
     <div className="card cases-card">
@@ -567,7 +728,7 @@ function CasesPanel({ cases, busy }) {
   )
 }
 
-function TracePanel({ trace, sources }) {
+function TracePanel({ trace, sources, suggestedRules, onSaveRules, busy }) {
   return (
     <div className="card trace-card">
       <h3>Agent 执行轨迹</h3>
@@ -579,6 +740,21 @@ function TracePanel({ trace, sources }) {
         </div>
       )) : <p className="empty">启动 Agent 优化后，这里会展示评估、修正和结束步骤。</p>}
       {sources.length > 0 && <div className="sources"><h4>知识库来源</h4>{sources.map((source) => <span key={source}>{source}</span>)}</div>}
+      {suggestedRules.length > 0 && (
+        <div className="rule-suggestions">
+          <div className="card-head compact-head">
+            <h4>可沉淀规则</h4>
+            <button onClick={onSaveRules} disabled={busy}>沉淀到知识库</button>
+          </div>
+          {suggestedRules.map((rule, index) => (
+            <div className="rule-item" key={`${rule.scene}-${index}`}>
+              <b>{rule.scene}</b>
+              <p>{rule.rule}</p>
+              <span>{rule.source} · {rule.confidence}</span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

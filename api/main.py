@@ -67,6 +67,14 @@ class GenerateRequest(BaseModel):
     prd_text: str = Field(alias="prdText")
     use_kb: bool = Field(default=True, alias="useKb")
     use_history: bool = Field(default=True, alias="useHistory")
+    analysis_context: Optional[Any] = Field(default=None, alias="analysisContext")
+
+
+class AnalyzeRequirementRequest(BaseModel):
+    config: ModelConfig
+    prd_text: str = Field(alias="prdText")
+    use_kb: bool = Field(default=True, alias="useKb")
+    use_history: bool = Field(default=True, alias="useHistory")
 
 
 class OptimizeRequest(BaseModel):
@@ -101,6 +109,12 @@ class HistorySaveRequest(BaseModel):
     prd_text: str = Field(alias="prdText")
     cases: Any
     summary: str = "历史用例"
+
+
+class RuleSaveRequest(BaseModel):
+    config: ModelConfig
+    rules: List[Dict[str, Any]]
+    source_prd: str = Field(default="", alias="sourcePrd")
 
 
 app = FastAPI(title="Auto PRD Test Agent API")
@@ -144,6 +158,22 @@ def _flatten_case_text(cases: Any) -> str:
     return str(cases or "")
 
 
+class MemoryUpload:
+    def __init__(self, name, file_type, data_bytes):
+        self.name = name
+        self.type = file_type
+        self._data = data_bytes
+
+    def seek(self, *_args):
+        return None
+
+    def read(self):
+        return self._data
+
+    def getvalue(self):
+        return self._data
+
+
 def _extract_relevance_terms(text: str) -> set[str]:
     lowered = text.lower()
     terms = set(re.findall(r"[a-z][a-z0-9_-]{2,}", lowered))
@@ -184,8 +214,8 @@ def _looks_irrelevant_to_prd(prd_text: str, cases: Any) -> bool:
     return len(overlap) < 2
 
 
-def _generate_cases_once(config: "ModelConfig", prd_text: str, rag_context: str):
-    prompt = PromptManager.get_initial_prompt(prd_text, rag_context)
+def _generate_cases_once(config: "ModelConfig", prd_text: str, rag_context: str, analysis_context=None):
+    prompt = PromptManager.get_initial_prompt(prd_text, rag_context, analysis_context=analysis_context)
     response_text, _ = get_chat_response(
         config.api_key,
         config.model_name,
@@ -202,6 +232,36 @@ def _generate_cases_once(config: "ModelConfig", prd_text: str, rag_context: str)
         parsed, repaired_text = _repair_cases_json(config, response_text, prd_text)
     cases = normalize_cases_data(parsed) if parsed else []
     return response_text, repaired_text, parsed, cases
+
+
+def _suggest_rules_from_result(config: "ModelConfig", prd_text: str, report: Any, trace: Any, cases: Any):
+    prompt = PromptManager.get_rule_suggestion_prompt(prd_text, report or {}, trace or [], cases or [])
+    response_text, _ = get_chat_response(
+        config.api_key,
+        config.model_name,
+        [],
+        prompt,
+        system_instruction="你是测试知识沉淀助手，只输出合法 JSON 数组。",
+        provider=config.provider,
+        base_url=config.base_url,
+    )
+    _raise_if_model_error(response_text)
+    parsed = extract_json_from_text(response_text)
+    if not isinstance(parsed, list):
+        return []
+    rules = []
+    for item in parsed[:5]:
+        if not isinstance(item, dict):
+            continue
+        rule = {
+            "scene": str(item.get("scene") or "通用场景").strip(),
+            "rule": str(item.get("rule") or "").strip(),
+            "source": str(item.get("source") or "AI 评估 + Agent 优化").strip(),
+            "confidence": str(item.get("confidence") or "medium").strip(),
+        }
+        if rule["rule"]:
+            rules.append(rule)
+    return rules
 
 
 def _rag_from_config(config: ModelConfig):
@@ -294,6 +354,49 @@ async def parse_file(
     return {"filename": name, "text": text, "visionUsed": enableVision}
 
 
+@app.post("/api/analyze-requirement")
+def analyze_requirement(req: AnalyzeRequirementRequest):
+    _require_key(req.config)
+    rag_context = ""
+    sources: List[str] = []
+
+    try:
+        rag = _rag_from_config(req.config)
+        if req.use_kb or req.use_history:
+            rag_context, sources = rag.search_context(
+                req.prd_text,
+                use_history=req.use_history,
+                use_knowledge=req.use_kb,
+            )
+    except Exception:
+        rag_context = ""
+        sources = []
+
+    prompt = PromptManager.get_requirement_analysis_prompt(req.prd_text, rag_context)
+    try:
+        response_text, _ = get_chat_response(
+            req.config.api_key,
+            req.config.model_name,
+            [],
+            prompt,
+            system_instruction=PromptManager.REQUIREMENT_ANALYSIS_SYSTEM_PROMPT,
+            provider=req.config.provider,
+            base_url=req.config.base_url,
+        )
+        _raise_if_model_error(response_text)
+        parsed = extract_json_from_text(response_text)
+        if not isinstance(parsed, dict):
+            raise ValueError("模型没有返回有效的需求分析 JSON 对象")
+        return {
+            "analysis": parsed,
+            "text": response_text,
+            "ragContext": rag_context,
+            "sources": sources,
+        }
+    except Exception as e:
+        _error(str(e))
+
+
 @app.post("/api/generate")
 def generate_cases(req: GenerateRequest):
     _require_key(req.config)
@@ -317,6 +420,7 @@ def generate_cases(req: GenerateRequest):
             req.config,
             req.prd_text,
             rag_context,
+            analysis_context=req.analysis_context,
         )
         rag_ignored = False
         if rag_context and _looks_irrelevant_to_prd(req.prd_text, cases):
@@ -324,6 +428,7 @@ def generate_cases(req: GenerateRequest):
                 req.config,
                 req.prd_text,
                 "",
+                analysis_context=req.analysis_context,
             )
             rag_ignored = True
 
@@ -369,21 +474,6 @@ async def upload_kb(config: str = Form(...), file: UploadFile = File(...), docTy
         else:
             parsed_text = RAGEngine._decode_text(raw)
 
-        class MemoryUpload:
-            def __init__(self, name, file_type, data_bytes):
-                self.name = name
-                self.type = file_type
-                self._data = data_bytes
-
-            def seek(self, *_args):
-                return None
-
-            def read(self):
-                return self._data
-
-            def getvalue(self):
-                return self._data
-
         rag = _rag_from_config(model_config)
         summary = filename
         rag.add_knowledge(
@@ -422,6 +512,50 @@ def save_history_case(req: HistorySaveRequest):
         _error(str(e))
 
 
+@app.post("/api/rules/save")
+def save_rules(req: RuleSaveRequest):
+    _require_key(req.config)
+    if not req.rules:
+        raise HTTPException(status_code=400, detail="没有可沉淀的规则。")
+
+    try:
+        content_parts = []
+        for index, item in enumerate(req.rules, start=1):
+            scene = str(item.get("scene") or "通用场景").strip()
+            rule = str(item.get("rule") or "").strip()
+            source = str(item.get("source") or "AI 评估 + Agent 优化").strip()
+            confidence = str(item.get("confidence") or "medium").strip()
+            if not rule:
+                continue
+            content_parts.append(
+                f"{index}. 场景：{scene}\n"
+                f"规则：{rule}\n"
+                f"来源：{source}\n"
+                f"置信度：{confidence}"
+            )
+
+        if not content_parts:
+            raise ValueError("规则内容为空，未写入知识库。")
+
+        content = "Agent 自动沉淀测试规则\n\n" + "\n\n".join(content_parts)
+        if req.source_prd:
+            content += f"\n\n关联 PRD 摘要：\n{req.source_prd[:1000]}"
+
+        raw = content.encode("utf-8")
+        filename = "agent_rules.txt"
+        rag = _rag_from_config(req.config)
+        rag.add_knowledge(
+            MemoryUpload(filename, "text/plain", raw),
+            summary=f"Agent 沉淀规则（{len(content_parts)} 条）",
+            content_text=content,
+            model_name=req.config.model_name,
+            doc_type="测试经验",
+        )
+        return {"ok": True, "count": len(content_parts), "summary": f"Agent 沉淀规则（{len(content_parts)} 条）"}
+    except Exception as e:
+        _error(str(e))
+
+
 @app.post("/api/evaluate")
 def evaluate_cases(req: EvaluateRequest):
     _require_key(req.config)
@@ -449,6 +583,17 @@ def agent_optimize(req: OptimizeRequest):
         max_rounds=req.max_rounds,
     )
     try:
-        return agent.run(req.prd_text, req.cases, rag_context=req.rag_context)
+        result = agent.run(req.prd_text, req.cases, rag_context=req.rag_context)
+        try:
+            result["suggestedRules"] = _suggest_rules_from_result(
+                req.config,
+                req.prd_text,
+                result.get("report"),
+                result.get("trace"),
+                result.get("cases"),
+            )
+        except Exception:
+            result["suggestedRules"] = []
+        return result
     except Exception as e:
         _error(str(e))
