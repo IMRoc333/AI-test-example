@@ -15,18 +15,6 @@ const defaultConfig = {
   visionModel: 'qwen-vl-plus',
 }
 
-const sampleCases = [
-  {
-    id: 'TC_001',
-    module: '登录',
-    precondition: '系统中存在已注册用户',
-    step: '输入合法手机号和验证码后点击登录',
-    expected: '用户登录成功并进入首页',
-    priority: 'P0',
-    design_strategy: '主流程验证',
-  },
-]
-
 const headers = ['id', 'module', 'precondition', 'step', 'expected', 'priority', 'design_strategy']
 const headerNames = {
   id: '用例ID',
@@ -418,16 +406,6 @@ function App() {
     }
   }
 
-  function loadDemo() {
-    updatePrdText('用户可以使用手机号验证码登录。验证码 5 分钟内有效。连续 5 次输入错误后，登录能力冻结 10 分钟。登录成功后进入首页。未注册手机号会自动创建新账号。')
-    setCases(sampleCases)
-    setReport(null)
-    setTrace([])
-    setSuggestedRules([])
-    setError('')
-    setNotice('')
-  }
-
   function restoreHistory(item) {
     setPrdText(item.prdText || '')
     setCases(item.cases || [])
@@ -494,7 +472,6 @@ function App() {
           {view === 'workbench' && (
             <div className="actions">
               <button onClick={() => setView('settings')}>切换模型</button>
-              <button onClick={loadDemo}>载入示例</button>
               <button onClick={analyzeRequirement} disabled={busy || !prdText}>需求分析</button>
               <button className="primary" onClick={generate} disabled={busy || !prdText || !analysisConfirmed}>生成用例</button>
             </div>
