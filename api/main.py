@@ -15,6 +15,7 @@ from core.agent_runner import TestCaseAgent, normalize_cases_data
 from core.document_parser import extract_pdf_text, render_pdf_pages
 from core.evaluator import Evaluator
 from core.llm_client import extract_json_from_text, get_chat_response
+from core.multi_agent import RequirementMultiAgentPipeline
 from core.rag_engine import RAGEngine
 
 
@@ -234,6 +235,20 @@ def _generate_cases_once(config: "ModelConfig", prd_text: str, rag_context: str,
     return response_text, repaired_text, parsed, cases
 
 
+def _case_generation_trace(cases: Any, rag_ignored: bool = False):
+    modules = sorted({str(item.get("module")) for item in cases if isinstance(item, dict) and item.get("module")})
+    return {
+        "agent": "用例生成 Agent",
+        "action": "finish",
+        "summary": f"基于确认模块树生成 {len(cases)} 条测试用例",
+        "output": {
+            "case_count": len(cases),
+            "modules": modules,
+            "rag_ignored": rag_ignored,
+        },
+    }
+
+
 def _suggest_rules_from_result(config: "ModelConfig", prd_text: str, report: Any, trace: Any, cases: Any):
     prompt = PromptManager.get_rule_suggestion_prompt(prd_text, report or {}, trace or [], cases or [])
     response_text, _ = get_chat_response(
@@ -372,24 +387,19 @@ def analyze_requirement(req: AnalyzeRequirementRequest):
         rag_context = ""
         sources = []
 
-    prompt = PromptManager.get_requirement_analysis_prompt(req.prd_text, rag_context)
     try:
-        response_text, _ = get_chat_response(
+        pipeline = RequirementMultiAgentPipeline(
             req.config.api_key,
             req.config.model_name,
-            [],
-            prompt,
-            system_instruction=PromptManager.REQUIREMENT_ANALYSIS_SYSTEM_PROMPT,
             provider=req.config.provider,
             base_url=req.config.base_url,
         )
-        _raise_if_model_error(response_text)
-        parsed = extract_json_from_text(response_text)
-        if not isinstance(parsed, dict):
-            raise ValueError("模型没有返回有效的需求分析 JSON 对象")
+        result = pipeline.run(req.prd_text, rag_context)
         return {
-            "analysis": parsed,
-            "text": response_text,
+            "analysis": result["analysis"],
+            "documentInsight": result["documentInsight"],
+            "agentTrace": result["agentTrace"],
+            "text": result["raw"],
             "ragContext": rag_context,
             "sources": sources,
         }
@@ -432,6 +442,8 @@ def generate_cases(req: GenerateRequest):
             )
             rag_ignored = True
 
+        agent_trace = [_case_generation_trace(cases, rag_ignored=rag_ignored)]
+
         return {
             "text": response_text,
             "repairedText": repaired_text,
@@ -440,6 +452,7 @@ def generate_cases(req: GenerateRequest):
             "ragContext": "" if rag_ignored else rag_context,
             "sources": [] if rag_ignored else sources,
             "ragIgnored": rag_ignored,
+            "agentTrace": agent_trace,
         }
     except Exception as e:
         _error(str(e))

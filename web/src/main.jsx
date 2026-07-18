@@ -91,6 +91,7 @@ function App() {
   const [analysisDraft, setAnalysisDraft] = useState('')
   const [analysisConfirmed, setAnalysisConfirmed] = useState(false)
   const [suggestedRules, setSuggestedRules] = useState([])
+  const [multiAgentTrace, setMultiAgentTrace] = useState([])
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
@@ -132,6 +133,7 @@ function App() {
     setAnalysisDraft('')
     setAnalysisConfirmed(false)
     setSuggestedRules([])
+    setMultiAgentTrace([])
   }
 
   function updatePrdText(value) {
@@ -211,6 +213,7 @@ function App() {
       setAnalysisConfirmed(false)
       setRagContext(data.ragContext || '')
       setSources(data.sources || [])
+      setMultiAgentTrace(data.agentTrace || [])
       setNotice('需求分析已完成，请确认模块树后再生成用例')
     } catch (err) {
       setError(err.message)
@@ -252,6 +255,7 @@ function App() {
       setCases(nextCases)
       setRagContext(data.ragContext || '')
       setSources(data.sources || [])
+      setMultiAgentTrace((prev) => [...prev, ...(data.agentTrace || [])])
       if (nextCases.length) saveLocalHistory('生成测试用例', nextCases, null, [])
       if (!nextCases.length) setError('模型没有返回有效的 JSON 用例，请检查模型名称、提示词或输出格式。')
     } catch (err) {
@@ -523,7 +527,7 @@ function App() {
 
             <section className="grid lower">
               <CasesPanel cases={cases} busy={busy} />
-              <TracePanel trace={trace} sources={sources} suggestedRules={suggestedRules} onSaveRules={saveSuggestedRules} busy={busy} />
+              <TracePanel trace={trace} sources={sources} suggestedRules={suggestedRules} onSaveRules={saveSuggestedRules} busy={busy} multiAgentTrace={multiAgentTrace} />
             </section>
           </>
         )}
@@ -705,10 +709,22 @@ function CasesPanel({ cases, busy }) {
   )
 }
 
-function TracePanel({ trace, sources, suggestedRules, onSaveRules, busy }) {
+function TracePanel({ trace, sources, suggestedRules, onSaveRules, busy, multiAgentTrace }) {
   return (
     <div className="card trace-card">
-      <h3>Agent 执行轨迹</h3>
+      <h3>Multi-Agent 协作轨迹</h3>
+      {multiAgentTrace.length ? multiAgentTrace.map((step, index) => (
+        <div className="trace multi-agent-step" key={`${step.agent}-${index}`}>
+          <b>{step.agent}</b>
+          <span>{step.action || 'finish'}</span>
+          <p>{step.summary}</p>
+          {step.output && (
+            <pre>{JSON.stringify(step.output, null, 2)}</pre>
+          )}
+        </div>
+      )) : <p className="empty">完成需求分析后，这里会展示文档解析 Agent、模块生成 Agent 和用例生成 Agent 的协作过程。</p>}
+
+      <h3 className="subsection-title">优化 Agent 轨迹</h3>
       {trace.length ? trace.map((step, index) => (
         <div className="trace" key={index}>
           <b>第 {step.round} 轮 · {step.action}</b>

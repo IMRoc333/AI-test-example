@@ -112,6 +112,100 @@ class PromptManager:
 4. assumptions 必须标注为假设，不得和明确规则混淆。
 """
 
+    DOCUMENT_AGENT_SYSTEM_PROMPT = """
+你是 Multi-Agent 流程中的“文档解析 Agent”。
+你的职责不是生成测试用例，也不是设计模块树，而是忠实理解 PRD。
+
+必须只输出合法 JSON 对象，结构如下：
+{
+  "summary": "一句话概括需求",
+  "actors": ["角色"],
+  "business_entities": ["业务对象"],
+  "core_flows": ["PRD 明确描述的核心流程"],
+  "explicit_rules": ["PRD 明确写出的规则"],
+  "ambiguities": ["描述不清或需要确认的信息"],
+  "risk_clues": ["从文本中识别出的测试风险线索"]
+}
+
+要求：
+1. 只抽取和归纳 PRD 内容，不要直接生成测试用例。
+2. 不要把知识库内容当成 PRD 明确规则。
+3. PRD 没写清楚的内容放入 ambiguities。
+"""
+
+    MODULE_AGENT_SYSTEM_PROMPT = """
+你是 Multi-Agent 流程中的“模块生成 Agent”。
+你的职责是基于文档解析 Agent 的输出生成可人工确认的测试模块树。
+
+必须只输出合法 JSON 对象，结构如下：
+{
+  "summary": "一句话概括需求",
+  "actors": ["角色"],
+  "core_flows": ["核心业务流程"],
+  "business_rules": ["明确业务规则"],
+  "modules": [
+    {
+      "name": "模块名",
+      "test_points": ["测试点"],
+      "risks": ["风险点"]
+    }
+  ],
+  "missing_questions": ["需要人工确认的问题"],
+  "assumptions": ["AI 基于测试经验提出的假设，必须人工确认"]
+}
+
+要求：
+1. modules 是后续用例生成 Agent 的输入，模块名必须清晰、业务化。
+2. explicit_rules 只能进入 business_rules。
+3. ambiguities 优先进入 missing_questions，不要强行脑补。
+4. 可以基于测试经验提出 assumptions，但必须明确标注为假设。
+"""
+
+    @staticmethod
+    def get_document_agent_prompt(prd_text, rag_text=""):
+        prompt = f"""
+请作为文档解析 Agent，理解以下 PRD。
+
+PRD：
+{prd_text}
+"""
+        if rag_text:
+            prompt += f"""
+
+参考知识库/历史用例：
+{rag_text}
+"""
+        prompt += """
+
+请严格输出合法 JSON 对象。不要输出 Markdown 或解释文字。
+"""
+        return prompt
+
+    @staticmethod
+    def get_module_agent_prompt(prd_text, document_insight, rag_text=""):
+        import json
+
+        prompt = f"""
+请作为模块生成 Agent，基于文档解析 Agent 的输出生成测试模块树。
+
+PRD：
+{prd_text}
+
+文档解析 Agent 输出：
+{json.dumps(document_insight, ensure_ascii=False, indent=2)}
+"""
+        if rag_text:
+            prompt += f"""
+
+参考知识库/历史用例：
+{rag_text}
+"""
+        prompt += """
+
+请严格输出合法 JSON 对象。不要输出 Markdown 或解释文字。
+"""
+        return prompt
+
     @staticmethod
     def get_requirement_analysis_prompt(prd_text, rag_text=""):
         prompt = f"""

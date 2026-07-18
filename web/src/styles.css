@@ -277,6 +277,29 @@ th { position: sticky; top: 0; background: #f8fafc; color: #475569; }
 .trace b { display: block; }
 .trace span { color: #15803d; font-size: 12px; }
 .trace p { margin: 5px 0 0; color: #64748b; }
+.trace pre {
+  max-height: 180px;
+  overflow: auto;
+  margin: 8px 0 0;
+  padding: 10px;
+  border-radius: 6px;
+  background: #0f172a;
+  color: #e5e7eb;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+.multi-agent-step {
+  border-left-color: #2563eb;
+}
+.multi-agent-step span {
+  color: #2563eb;
+}
+.subsection-title {
+  margin-top: 20px !important;
+  padding-top: 16px;
+  border-top: 1px solid #e2e8f0;
+}
 .sources { margin-top: 18px; }
 .sources h4 { margin: 0 0 8px; }
 .sources span {
