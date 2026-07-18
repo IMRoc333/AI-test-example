@@ -7,12 +7,14 @@ from PIL import Image
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from config.settings import setup_proxy
+from config.settings import setup_proxy, is_valid_api_key
 from config.prompts import PromptManager
 from ui.sidebar import render_sidebar
 from ui.components import display_results
-from core.llm_client import get_gemini_chat_response, generate_summary, extract_json_from_text
+from core.llm_client import get_chat_response, generate_summary, extract_json_from_text
 from core.rag_engine import RAGEngine
+from core.agent_runner import TestCaseAgent
+from core.document_parser import extract_pdf_text
 from core.evaluator import Evaluator # 新增引用
 
 def split_text_and_json(text):
@@ -44,6 +46,17 @@ def split_text_and_json(text):
         
     return text, json_data
 
+
+def normalize_cases_data(data):
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ("cases", "test_cases", "data", "items"):
+            if isinstance(data.get(key), list):
+                return data[key]
+        return [data]
+    return []
+
 def main():
     setup_proxy()
     st.set_page_config(page_title="Auto_prd_test_expert", layout="wide")
@@ -58,15 +71,20 @@ def main():
     if 'processed_files' not in st.session_state: st.session_state['processed_files'] = []
     # 新增：评估报告状态
     if 'eval_report' not in st.session_state: st.session_state['eval_report'] = None
+    if 'agent_trace' not in st.session_state: st.session_state['agent_trace'] = []
 
-    api_key, selected_model = render_sidebar()
+    api_key, selected_model, provider, base_url, embedding_model = render_sidebar()
+    provider_state_key = f"{provider}:{base_url}"
+    if st.session_state.get('active_provider') != provider_state_key:
+        st.session_state['gemini_history'] = []
+        st.session_state['active_provider'] = provider_state_key
     rag_engine = None
     evaluator = None # 初始化评估器
 
-    if api_key:
+    if is_valid_api_key(api_key):
         try:
-            rag_engine = RAGEngine(api_key)
-            evaluator = Evaluator(api_key) # 实例化评估器
+            rag_engine = RAGEngine(api_key, provider=provider, base_url=base_url, embedding_model=embedding_model)
+            evaluator = Evaluator(api_key, provider=provider, base_url=base_url) # 实例化评估器
         except Exception as e:
             st.sidebar.error(f"引擎初始化失败: {e}")
 
@@ -90,7 +108,7 @@ def main():
                 use_kb = c1.checkbox("📚 参考技术规范", value=True)
                 use_hist = c2.checkbox("🕰️ 参考历史案例", value=True)
 
-                if uploaded_files and rag_engine and api_key:
+                if uploaded_files and rag_engine and is_valid_api_key(api_key):
                     current_file_names = [f.name for f in uploaded_files]
                     if current_file_names != st.session_state['processed_files']:
                         with st.spinner("正在预处理文档并检索知识库..."):
@@ -99,14 +117,23 @@ def main():
                             for file in uploaded_files:
                                 file.seek(0)
                                 if "image" in file.type:
-                                    img = Image.open(file)
-                                    prompt_content.extend([f"图片 {file.name}:", img])
+                                    if provider == "openai_compatible":
+                                        prompt_content.extend([f"图片 {file.name}:", {"mime_type": file.type, "data": file.read()}])
+                                    else:
+                                        img = Image.open(file)
+                                        prompt_content.extend([f"图片 {file.name}:", img])
                                     preview_txt += f"[图片 {file.name}] "
                                 elif "pdf" in file.type:
-                                    prompt_content.extend([f"文档 {file.name}:", {"mime_type": "application/pdf", "data": file.read()}])
-                                    preview_txt += f"[PDF {file.name}] "
+                                    pdf_bytes = file.read()
+                                    if provider == "openai_compatible":
+                                        txt = extract_pdf_text(pdf_bytes)
+                                        prompt_content.append(f"文档 {file.name}:\n{txt}")
+                                        preview_txt += txt[:500]
+                                    else:
+                                        prompt_content.extend([f"文档 {file.name}:", {"mime_type": "application/pdf", "data": pdf_bytes}])
+                                        preview_txt += f"[PDF {file.name}] "
                                 else:
-                                    txt = file.read().decode("utf-8")
+                                    txt = RAGEngine._decode_text(file.read())
                                     prompt_content.append(f"文档 {file.name}:\n{txt}")
                                     preview_txt += txt[:500]
                             # 1. 粗筛：检索 RAG (这里稍微放大一点召回范围，比如 n_results=3 或 5，rag_engine里改不改都行，暂保持3)
@@ -120,13 +147,15 @@ def main():
                                     filter_prompt = PromptManager.get_rag_filter_prompt(preview_txt, raw_rag_info)
                                     
                                     # 调用 LLM (建议用 Flash 模型，速度快)
-                                    # 注意：这里直接复用 get_gemini_chat_response 或者直接调用 SDK 均可
+                                    # 注意：这里直接复用统一的 chat 接口
                                     # 为了方便，假设我们复用现有的 chat 接口，但不带历史记录
-                                    filtered_text, _ = get_gemini_chat_response(
+                                    filtered_text, _ = get_chat_response(
                                         api_key, 
                                         selected_model, # 或者强制指定 "models/gemini-1.5-flash" 以提速
                                         [], # 无历史
-                                        filter_prompt
+                                        filter_prompt,
+                                        provider=provider,
+                                        base_url=base_url
                                     )
                                     
                                     # 判断清洗结果
@@ -153,7 +182,7 @@ def main():
             # 2. 按钮逻辑
             btn_label = "🚀 开始生成" if not st.session_state['messages'] else "📤 发送补充文件并分析"
             if st.button(btn_label, type="primary", use_container_width=True):
-                if not api_key: st.error("请配置 API Key"); st.stop()
+                if not is_valid_api_key(api_key): st.error("请配置 API Key"); st.stop()
                 
                 if 'current_prompt_content' in st.session_state:
                     with st.spinner(f"正在使用 {selected_model} 分析..."):
@@ -163,11 +192,13 @@ def main():
                         )
                         full_payload = initial_prompt + st.session_state.get('current_prompt_content', [])
                         
-                        resp_text, updated_history = get_gemini_chat_response(
+                        resp_text, updated_history = get_chat_response(
                             api_key, selected_model, 
                             st.session_state['gemini_history'], 
                             full_payload, 
-                            system_instruction=PromptManager.CORE_SYSTEM_PROMPT
+                            system_instruction=PromptManager.CORE_SYSTEM_PROMPT,
+                            provider=provider,
+                            base_url=base_url
                         )
                         
                         st.session_state['gemini_history'] = updated_history
@@ -177,6 +208,7 @@ def main():
                         if json_data:
                             st.session_state['res_data'] = json_data
                             st.session_state['eval_report'] = None # 重新生成后清空旧的评估报告
+                            st.session_state['agent_trace'] = []
                         
                         del st.session_state['current_prompt_content'] 
                         st.rerun()
@@ -220,7 +252,7 @@ def main():
 
             # 4. 底部对话输入
             if prompt := st.chat_input("输入指令 (如: '增加几个异常场景')"):
-                if not api_key: st.stop()
+                if not is_valid_api_key(api_key): st.stop()
                 st.session_state['messages'].append({"role": "user", "content": prompt})
                 with chat_container:
                     with st.chat_message("user"):
@@ -233,11 +265,13 @@ def main():
                                 prompt, st.session_state['rag_context']
                             )
                             
-                            resp_text, updated_history = get_gemini_chat_response(
+                            resp_text, updated_history = get_chat_response(
                                 api_key, selected_model, 
                                 st.session_state['gemini_history'], 
                                 refine_prompt_str,
-                                system_instruction=PromptManager.CORE_SYSTEM_PROMPT
+                                system_instruction=PromptManager.CORE_SYSTEM_PROMPT,
+                                provider=provider,
+                                base_url=base_url
                             )
                             
                             explanation, new_json = split_text_and_json(resp_text)
@@ -252,6 +286,7 @@ def main():
                             if new_json:
                                 st.session_state['res_data'] = new_json
                                 st.session_state['eval_report'] = None # 数据更新后清空评估
+                                st.session_state['agent_trace'] = []
                                 st.rerun()
 
         # --- 右侧：预览、归档与评估 ---
@@ -259,7 +294,8 @@ def main():
             st.subheader("📄 实时结果预览")
             
             if st.session_state['res_data']:
-                df = pd.DataFrame(st.session_state['res_data'])
+                cases_data = normalize_cases_data(st.session_state['res_data'])
+                df = pd.DataFrame(cases_data)
                 module_list = df['module'].unique() if 'module' in df.columns else []
                 st.caption(f"📊 当前共 **{len(df)}** 条用例 | 覆盖模块: {', '.join(module_list)}")
                 
@@ -272,6 +308,15 @@ def main():
                 with tab_json:
                     json_str_val = json.dumps(st.session_state['res_data'], indent=2, ensure_ascii=False)
                     edited_json_str = st.text_area("直接编辑 JSON", value=json_str_val, height=600)
+                    if st.button("应用 JSON 修改", use_container_width=True):
+                        try:
+                            st.session_state['res_data'] = json.loads(edited_json_str)
+                            st.session_state['eval_report'] = None
+                            st.session_state['agent_trace'] = []
+                            st.success("JSON 修改已应用")
+                            st.rerun()
+                        except json.JSONDecodeError as e:
+                            st.error(f"JSON 格式错误: {e}")
 
                 # ==================== 智能评估模块 (新增) ====================
                 with tab_eval:
@@ -282,7 +327,47 @@ def main():
                     golden_file = st.file_uploader("上传标准参考用例 (可选，作为对比标杆)", type=['json', 'txt', 'md'], help="如果有已存在的正确用例，上传后 AI 将进行对比分析")
                     golden_content = ""
                     if golden_file:
-                        golden_content = golden_file.getvalue().decode('utf-8')[:10000] # 限制长度
+                        golden_content = RAGEngine._decode_text(golden_file.getvalue())[:10000] # 限制长度
+
+                    agent_col1, agent_col2 = st.columns(2)
+                    target_score = agent_col1.number_input("Agent target score", min_value=50, max_value=100, value=85, step=5)
+                    max_rounds = agent_col2.number_input("Max revise rounds", min_value=1, max_value=5, value=2, step=1)
+
+                    if st.button("Run Agentic Auto-Optimize", use_container_width=True):
+                        if evaluator:
+                            with st.spinner("Agent is evaluating and revising cases..."):
+                                agent = TestCaseAgent(
+                                    api_key,
+                                    selected_model,
+                                    provider=provider,
+                                    base_url=base_url,
+                                    evaluator=evaluator,
+                                    target_score=target_score,
+                                    max_rounds=max_rounds,
+                                )
+                                result = agent.run(
+                                    st.session_state.get('prd_context', ''),
+                                    st.session_state['res_data'],
+                                    rag_context=st.session_state.get('rag_context', ''),
+                                    golden_cases_content=golden_content,
+                                )
+                                st.session_state['res_data'] = result['cases']
+                                st.session_state['eval_report'] = result['report']
+                                st.session_state['agent_trace'] = result['trace']
+                                st.success("Agentic optimization finished")
+                                st.rerun()
+                        else:
+                            st.error("Evaluator is not initialized")
+
+                    if st.session_state.get('agent_trace'):
+                        with st.expander("Agent execution trace", expanded=True):
+                            for step in st.session_state['agent_trace']:
+                                score_text = "" if step.get("score") is None else f" | score={step.get('score')}"
+                                st.markdown(f"**Round {step.get('round')} - {step.get('action')}**{score_text}")
+                                if step.get("summary"):
+                                    st.caption(step.get("summary"))
+                                if step.get("details"):
+                                    st.json(step.get("details"))
 
                     # 2. 评估按钮
                     if st.button("⚖️ 开始全面评估", use_container_width=True):
@@ -328,7 +413,13 @@ def main():
                                 st.success("未发现明显覆盖率缺失")
                                 
                             if report.get('logic_issues'):
-                                st.warning(f"**逻辑/幻觉风险**:\n" + "\n".join([f"- {i['id']}: {i['issue']}" for i in report['logic_issues']]))
+                                logic_lines = []
+                                for item in report['logic_issues']:
+                                    if isinstance(item, dict):
+                                        logic_lines.append(f"- {item.get('id', '-')}: {item.get('issue', item)}")
+                                    else:
+                                        logic_lines.append(f"- {item}")
+                                st.warning(f"**逻辑/幻觉风险**:\n" + "\n".join(logic_lines))
                             else:
                                 st.success("逻辑一致性良好")
                         
@@ -349,7 +440,7 @@ def main():
                         try:
                             final_data = json.loads(edited_json_str) if 'edited_json_str' in locals() else st.session_state['res_data']
                             with st.spinner("归档中..."):
-                                summary = generate_summary(api_key, str(final_data), model_name=selected_model)
+                                summary = generate_summary(api_key, str(final_data), model_name=selected_model, provider=provider, base_url=base_url)
                                 rag_engine.add_history_case(st.session_state.get('prd_context', '对话生成的用例'), final_data, summary=summary)
                                 st.success(f"已归档: {summary}")
                                 st.balloons()
@@ -370,11 +461,11 @@ def main():
                         kb_file.seek(0)
                         parsed_text = ""
                         if "text" in kb_file.type:
-                            parsed_text = kb_file.getvalue().decode("utf-8")
+                            parsed_text = RAGEngine._decode_text(kb_file.getvalue())
                         else:
                             parsed_text = rag_engine.parse_file_content(kb_file, kb_file.type, model_name=selected_model)
                         
-                        summary = generate_summary(api_key, parsed_text[:5000], model_name=selected_model)
+                        summary = generate_summary(api_key, parsed_text[:5000], model_name=selected_model, provider=provider, base_url=base_url)
                         kb_file.seek(0)
                         rag_engine.add_knowledge(kb_file, summary=summary, content_text=parsed_text, model_name=selected_model)
                         st.success(f"✅ 已存入！摘要：{summary}")

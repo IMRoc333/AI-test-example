@@ -6,6 +6,8 @@ __pycache__/
 .env
 .venv
 venv/
+web/node_modules/
+web/dist/
 
 # 3. IDE 配置
 .vscode/
@@ -16,5 +18,9 @@ data/vector_db/
 data/raw_files/
 data/user_config.json
 
-# 5. 保留 data 目录结构
+# 5. 本地演示截图/原始仓库导出物
+image*.png
+Readme.pdf
+
+# 6. 保留 data 目录结构
 !data/.gitkeep

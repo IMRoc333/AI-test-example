@@ -1,69 +1,61 @@
-import google.generativeai as genai
-import json
-import sys
 import os
+import sys
 
-# 路径适配
+import google.generativeai as genai
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from config.prompts import PromptManager
 from core.llm_client import extract_json_from_text
+from core.openai_compatible import DEFAULT_CHAT_MODEL, OpenAICompatibleClient
+
 
 class Evaluator:
-    def __init__(self, api_key):
+    def __init__(self, api_key, provider="gemini", base_url=None):
         if not api_key:
             raise ValueError("Evaluator 需要 API Key")
         self.api_key = api_key
-        
+        self.provider = provider
+        self.base_url = base_url
+
     def evaluate_cases(self, model_name, prd_text, current_cases, rag_context=None, golden_cases_content=None):
-        """
-        执行测试用例评估
-        
-        Args:
-            model_name: 使用的模型 (建议使用 Pro 版本以获得更好的逻辑推理能力)
-            prd_text: 原始需求文本
-            current_cases: 当前 AI 生成的测试用例 (List/Dict 或 JSON String)
-            rag_context: RAG 检索到的规范上下文
-            golden_cases_content: (可选) 人工上传的标准用例内容
-            
-        Returns:
-            dict: 包含分数、建议等信息的结构化报告
-        """
         try:
-            genai.configure(api_key=self.api_key)
-            model = genai.GenerativeModel(
-                model_name, 
-                system_instruction=PromptManager.EVALUATOR_SYSTEM_PROMPT
-            )
-            
-            # 构建 Prompt
             prompt_text = PromptManager.get_evaluation_prompt(
-                prd_text, 
-                current_cases, 
-                rag_text=rag_context, 
-                golden_cases_text=golden_cases_content
+                prd_text,
+                current_cases,
+                rag_text=rag_context,
+                golden_cases_text=golden_cases_content,
             )
-            
-            # 调用模型
-            # 评估任务通常不需要流式传输，一次性生成即可
-            response = model.generate_content(prompt_text)
-            
-            # 解析结果
-            report_json = extract_json_from_text(response.text)
-            
+
+            if self.provider == "openai_compatible":
+                response_text, _ = OpenAICompatibleClient(self.api_key, self.base_url).chat(
+                    model_name or DEFAULT_CHAT_MODEL,
+                    [],
+                    prompt_text,
+                    system_instruction=PromptManager.EVALUATOR_SYSTEM_PROMPT,
+                )
+            else:
+                genai.configure(api_key=self.api_key)
+                model = genai.GenerativeModel(
+                    model_name,
+                    system_instruction=PromptManager.EVALUATOR_SYSTEM_PROMPT,
+                )
+                response = model.generate_content(prompt_text)
+                response_text = response.text
+
+            report_json = extract_json_from_text(response_text)
             if not report_json:
-                # 兜底返回
                 return {
                     "score": 0,
                     "summary": "AI 未能生成有效的 JSON 格式报告，请重试。",
                     "coverage_gap": [],
                     "logic_issues": [],
                     "duplicates": [],
-                    "suggestions": [f"原始响应: {response.text[:200]}..."]
+                    "suggestions": [f"原始响应: {response_text[:200]}..."],
                 }
-                
+
             return report_json
-            
+
         except Exception as e:
             print(f"评估过程出错: {e}")
             return {
@@ -72,5 +64,5 @@ class Evaluator:
                 "coverage_gap": [],
                 "logic_issues": [],
                 "duplicates": [],
-                "suggestions": ["请检查网络连接或 API Key 配额"]
+                "suggestions": ["请检查网络连接或 API Key 配额"],
             }

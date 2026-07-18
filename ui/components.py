@@ -3,6 +3,29 @@ import pandas as pd
 import json
 import yaml
 
+
+def dataframe_to_markdown(df):
+    if df is None or df.empty:
+        return ""
+
+    def cell(value):
+        try:
+            empty = pd.isna(value)
+            if not isinstance(empty, bool):
+                empty = False
+        except Exception:
+            empty = False
+        text = "" if empty else str(value)
+        return text.replace("\n", "<br>").replace("|", "\\|")
+
+    headers = [cell(col) for col in df.columns]
+    rows = ["| " + " | ".join(headers) + " |"]
+    rows.append("| " + " | ".join(["---"] * len(headers)) + " |")
+    for _, row in df.iterrows():
+        rows.append("| " + " | ".join(cell(row[col]) for col in df.columns) + " |")
+    return "\n".join(rows)
+
+
 def display_results(df, raw_json):
     """渲染结果表格和下载区"""
     if df is not None:
@@ -30,5 +53,5 @@ def display_results(df, raw_json):
         c3.download_button("YAML", yaml_str, "cases.yaml", "text/yaml")
         
         # 4. Markdown
-        md_str = df.to_markdown(index=False)
+        md_str = dataframe_to_markdown(df)
         c4.download_button("Markdown", md_str, "cases.md", "text/markdown")

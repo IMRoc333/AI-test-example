@@ -9,6 +9,8 @@ from PIL import Image
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from config.prompts import PromptManager
+from core.openai_compatible import DEFAULT_EMBEDDING_MODEL, OpenAICompatibleClient
+from core.document_parser import extract_pdf_text
 
 # 路径配置
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -82,26 +84,58 @@ class TextSplitter:
         return chunks
 
 class RAGEngine:
-    def __init__(self, api_key):
+    def __init__(self, api_key, provider="gemini", base_url=None, embedding_model=None):
         if not api_key: raise ValueError("RAG Engine 需要 API Key")
         self.client = chromadb.PersistentClient(path=DB_PATH)
-        self.embedding_fn = GeminiEmbeddingFunction(api_key)
+        self.provider = provider
+        self.base_url = base_url
+        self.embedding_model = embedding_model
+        if provider == "openai_compatible":
+            self.embedding_fn = OpenAICompatibleEmbeddingFunction(
+                api_key,
+                base_url=base_url,
+                model_name=embedding_model or DEFAULT_EMBEDDING_MODEL,
+            )
+        else:
+            self.embedding_fn = GeminiEmbeddingFunction(api_key)
         self.api_key = api_key 
 
-        self.history_coll = self.client.get_or_create_collection(name="history_cases", embedding_function=self.embedding_fn)
-        self.knowledge_coll = self.client.get_or_create_collection(name="company_knowledge", embedding_function=self.embedding_fn)
+        suffix = "_openai" if provider == "openai_compatible" else ""
+        self.history_coll = self.client.get_or_create_collection(name=f"history_cases{suffix}", embedding_function=self.embedding_fn)
+        self.knowledge_coll = self.client.get_or_create_collection(name=f"company_knowledge{suffix}", embedding_function=self.embedding_fn)
 
     def _save_raw_file(self, file_obj, filename):
-        safe_name = f"{uuid.uuid4().hex[:8]}_{filename}"
+        safe_name = f"{uuid.uuid4().hex[:8]}_{os.path.basename(filename)}"
         file_path = os.path.join(DOC_PATH, safe_name)
         file_obj.seek(0)
         with open(file_path, "wb") as f:
             f.write(file_obj.read())
         return file_path
 
+    @staticmethod
+    def _decode_text(raw_bytes):
+        for encoding in ("utf-8-sig", "utf-8", "gb18030"):
+            try:
+                return raw_bytes.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+        return raw_bytes.decode("utf-8", errors="ignore")
+
     def parse_file_content(self, file_obj, file_type, model_name="models/gemini-1.5-flash"):
         """利用 AI 解析图片/PDF 内容为文本"""
         try:
+            if self.provider == "openai_compatible":
+                file_obj.seek(0)
+                if "pdf" in file_type:
+                    return extract_pdf_text(file_obj.read())
+                if "image" in file_type:
+                    image_bytes = file_obj.read()
+                    response_text, _ = OpenAICompatibleClient(self.api_key, self.base_url).chat(
+                        model_name,
+                        [],
+                        [PromptManager.MULTIMODAL_PARSE_PROMPT, {"mime_type": file_type, "data": image_bytes}],
+                    )
+                    return response_text
             genai.configure(api_key=self.api_key)
             model = genai.GenerativeModel(model_name)
             
@@ -117,26 +151,31 @@ class RAGEngine:
                 file_bytes = file_obj.read()
                 content_part = [prompt, {"mime_type": "application/pdf", "data": file_bytes}]
             else:
-                return file_obj.read().decode('utf-8')
+                return self._decode_text(file_obj.read())
             
             resp = model.generate_content(content_part)
             return resp.text
         except Exception as e:
             return f"[解析失败] {str(e)}"
 
-    def add_knowledge(self, file_obj, summary="", content_text=None, model_name="models/gemini-1.5-flash"):
+    def add_knowledge(self, file_obj, summary="", content_text=None, model_name="models/gemini-1.5-flash", doc_type="技术文档"):
         """支持 Chunking 切片存储"""
-        saved_path = self._save_raw_file(file_obj, file_obj.name)
-        
         final_content = ""
         if content_text:
             final_content = content_text
         else:
             if "text" in file_obj.type or "md" in file_obj.name:
                 file_obj.seek(0)
-                final_content = file_obj.getvalue().decode("utf-8")
+                final_content = self._decode_text(file_obj.getvalue())
             else:
                 final_content = self.parse_file_content(file_obj, file_obj.type, model_name)
+
+        if not final_content or not final_content.strip():
+            raise ValueError("文档内容为空，未写入知识库")
+        if final_content.startswith("[解析失败]"):
+            raise ValueError(final_content)
+
+        saved_path = self._save_raw_file(file_obj, file_obj.name)
 
         # 执行切片
         chunks = TextSplitter.recursive_split(final_content, chunk_size=500, chunk_overlap=100)
@@ -159,9 +198,12 @@ class RAGEngine:
                 "file_path": saved_path,
                 "chunk_index": i,
                 "type": "spec",
+                "doc_type": doc_type,
                 "date": current_time
             })
 
+        if not documents:
+            raise ValueError("文档切片为空，未写入知识库")
         self.knowledge_coll.add(documents=documents, metadatas=metadatas, ids=ids)
 
     def add_history_case(self, prd_text, final_json, summary=""):
@@ -183,10 +225,10 @@ class RAGEngine:
                 meta = data['metadatas'][i]
                 doc_id = meta.get('doc_id')
                 if not doc_id: # 兼容旧数据
-                    unique_docs[data['ids'][i]] = {"ID": data['ids'][i], "文件名/标题": meta.get('source', 'unknown'), "AI摘要": meta.get('summary', '-'), "类型": "历史用例" if collection_type == "history" else "技术文档", "录入时间": meta.get('date', '-'), "原始路径": meta.get('file_path', 'N/A')}
+                    unique_docs[data['ids'][i]] = {"ID": data['ids'][i], "文件名/标题": meta.get('source', 'unknown'), "AI摘要": meta.get('summary', '-'), "类型": "历史用例" if collection_type == "history" else "技术文档", "doc_type": meta.get('doc_type', "历史用例" if collection_type == "history" else "技术文档"), "录入时间": meta.get('date', '-'), "原始路径": meta.get('file_path', 'N/A')}
                     continue
                 if doc_id not in unique_docs:
-                    unique_docs[doc_id] = {"ID": doc_id, "文件名/标题": meta.get('source', 'unknown'), "AI摘要": meta.get('summary', '-'), "类型": "历史用例" if collection_type == "history" else "技术文档", "录入时间": meta.get('date', '-'), "原始路径": meta.get('file_path', 'N/A')}
+                    unique_docs[doc_id] = {"ID": doc_id, "文件名/标题": meta.get('source', 'unknown'), "AI摘要": meta.get('summary', '-'), "类型": "历史用例" if collection_type == "history" else "技术文档", "doc_type": meta.get('doc_type', "历史用例" if collection_type == "history" else "技术文档"), "录入时间": meta.get('date', '-'), "原始路径": meta.get('file_path', 'N/A')}
         return list(unique_docs.values())
 
     def get_doc_content(self, file_path, doc_id=None, collection_type="knowledge"):
@@ -253,3 +295,18 @@ class GeminiEmbeddingFunction(chromadb.EmbeddingFunction):
             result = genai.embed_content(model="models/text-embedding-004", content=input, task_type="retrieval_document")
             return result['embedding']
         except: return [[0.0] * 768 for _ in input]
+
+
+class OpenAICompatibleEmbeddingFunction(chromadb.EmbeddingFunction):
+    def __init__(self, api_key, base_url=None, model_name=DEFAULT_EMBEDDING_MODEL):
+        self.client = OpenAICompatibleClient(api_key, base_url)
+        self.model_name = model_name
+
+    def __call__(self, input):
+        if isinstance(input, str):
+            input = [input]
+        try:
+            return self.client.embed(self.model_name, input)
+        except Exception as e:
+            print(f"OpenAI-compatible embedding 失败: {e}")
+            return [[0.0] * 1536 for _ in input]

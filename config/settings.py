@@ -1,6 +1,13 @@
 import os
 import json
 
+PLACEHOLDER_API_KEYS = {
+    "",
+    "YOUR_GEMINI_API_KEY_HERE",
+    "YOUR_API_KEY_HERE",
+    "PASTE_YOUR_GEMINI_API_KEY_HERE",
+}
+
 
 # --- 1. 智能代理配置 ---
 def setup_proxy():
@@ -15,7 +22,9 @@ def setup_proxy():
 
     # 只有在本地直接运行且没有环境变量时，才使用这个默认值
     # 你可以保留这个方便自己本地调试，但提交到 GitHub 也没关系，因为别人运行时如果不配环境，只是连不上网，不会报错
-    default_proxy = 'http://127.0.0.1:7897'
+    default_proxy = os.environ.get("APP_PROXY")
+    if not default_proxy:
+        return
     os.environ['HTTP_PROXY'] = default_proxy
     os.environ['HTTPS_PROXY'] = default_proxy
     print(f"使用本地默认代理: {default_proxy}")
@@ -49,7 +58,26 @@ def load_config():
     if env_key:
         config['api_key'] = env_key
 
+    openai_key = os.environ.get("OPENAI_API_KEY")
+    if openai_key:
+        config['api_key'] = openai_key
+        config['provider'] = os.environ.get("MODEL_PROVIDER", "openai_compatible")
+
+    if os.environ.get("OPENAI_BASE_URL"):
+        config['base_url'] = os.environ["OPENAI_BASE_URL"]
+    if os.environ.get("OPENAI_MODEL"):
+        config['model_name'] = os.environ["OPENAI_MODEL"]
+    if os.environ.get("OPENAI_EMBEDDING_MODEL"):
+        config['embedding_model'] = os.environ["OPENAI_EMBEDDING_MODEL"]
+
     return config
+
+
+def is_valid_api_key(api_key):
+    if not api_key:
+        return False
+    normalized = str(api_key).strip()
+    return normalized not in PLACEHOLDER_API_KEYS and not normalized.startswith("YOUR_")
 
 
 def save_config(config):
