@@ -6,7 +6,7 @@ class PromptManager:
 1. 只输出合法 JSON，不要输出 Markdown 代码块，不要输出解释文字。
 2. 顶层必须是 JSON 数组。
 3. 每条用例必须包含字段：
-   id, module, precondition, step, expected, priority, design_strategy
+   id, module, precondition, step, expected, priority, design_strategy, source, source_detail
 4. priority 只能是 P0、P1、P2。
 5. 用例需要覆盖主流程、异常流程、边界值、状态流转、权限/登录、网络异常、幂等/重复提交等风险。
 6. 不要穷举笛卡尔积，优先使用等价类、边界值、Pairwise 和风险驱动方法。
@@ -22,7 +22,9 @@ class PromptManager:
     "step": "输入合法手机号和验证码后点击登录",
     "expected": "登录成功并跳转首页",
     "priority": "P0",
-    "design_strategy": "主流程验证"
+    "design_strategy": "主流程验证",
+    "source": "PRD明确规则",
+    "source_detail": "PRD 明确说明用户输入合法手机号和验证码后可以登录"
   }
 ]
 """
@@ -66,6 +68,7 @@ class PromptManager:
 2. 用例步骤和预期结果因果清晰，分数更高。
 3. 缺少重要业务规则、历史缺陷、知识库规则时要扣分。
 4. 存在重复、泛泛而谈或不可执行用例时要扣分。
+5. 用例缺少 source/source_detail，或来源无法追溯到 PRD、用户澄清、知识库、历史缺陷或合理风险推理时要扣分。
 """
 
     RAG_FILTER_PROMPT = """
@@ -243,6 +246,10 @@ PRD：
 3. 如果参考资料与 PRD 不一致或不相关，请直接忽略参考资料。
 4. 不要为知识库文档、模型接口、API 配置、平台自身功能生成测试用例，除非这些内容明确出现在 PRD 中。
 5. 如果提供了“用户确认后的需求分析/模块树”，必须优先按确认模块生成用例。
+6. 如果用户回答了澄清问题，澄清答案优先级高于 AI 假设；未回答的问题只能作为待确认风险，不得当作确定业务规则。
+7. 每条用例必须标注 source 和 source_detail：
+   - source 只能从以下值选择：PRD明确规则、用户澄清、知识库规则、历史缺陷、AI风险推理
+   - source_detail 必须说明该用例可追溯到哪条 PRD、澄清答案、知识库规则或风险推理
 
 PRD：
 {prd_text}
@@ -263,7 +270,7 @@ PRD：
 
 请严格输出合法 JSON 数组。
 不要输出任何解释、标题、Markdown 或代码块。
-每条用例字段必须包含：id, module, precondition, step, expected, priority, design_strategy。
+每条用例字段必须包含：id, module, precondition, step, expected, priority, design_strategy, source, source_detail。
 建议生成 12 到 20 条高质量用例。
 生成前请先在内部确认：每条用例都能直接追溯到 PRD。如果不能追溯，请不要输出该用例。
 """

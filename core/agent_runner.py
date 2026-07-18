@@ -30,7 +30,9 @@ def build_revision_prompt(prd_text, current_cases, report, rag_context=""):
 3. 删除明显重复或逻辑冲突的用例。
 4. 必须输出完整、合法的 JSON 数组。
 5. 不要输出 Markdown、解释文字或代码块。
-6. 每条用例必须包含 id, module, precondition, step, expected, priority, design_strategy。
+6. 每条用例必须包含 id, module, precondition, step, expected, priority, design_strategy, source, source_detail。
+7. source 只能从以下值选择：PRD明确规则、用户澄清、知识库规则、历史缺陷、AI风险推理。
+8. source_detail 必须说明该用例可追溯到哪条 PRD、澄清答案、知识库规则或风险推理。
 
 PRD：
 {prd_text}

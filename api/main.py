@@ -32,11 +32,13 @@ PRD：
 
 要求：
 1. 顶层必须是数组。
-2. 每条用例必须包含 id, module, precondition, step, expected, priority, design_strategy。
+2. 每条用例必须包含 id, module, precondition, step, expected, priority, design_strategy, source, source_detail。
 3. PRD 是唯一被测对象，所有用例都必须直接围绕 PRD 的业务对象和业务规则。
 4. 如果原始输出与 PRD 主题不一致，请丢弃原始输出，并根据 PRD 重新生成高质量测试用例。
 5. 如果原文没有足够用例，请根据 PRD 语义补全。
-6. 只输出 JSON 数组。
+6. source 只能从以下值选择：PRD明确规则、用户澄清、知识库规则、历史缺陷、AI风险推理。
+7. source_detail 必须说明该用例来源于哪条 PRD、澄清答案、知识库规则或风险推理。
+8. 只输出 JSON 数组。
 
 原始输出：
 {raw_text}
@@ -231,8 +233,24 @@ def _generate_cases_once(config: "ModelConfig", prd_text: str, rag_context: str,
     repaired_text = ""
     if not parsed:
         parsed, repaired_text = _repair_cases_json(config, response_text, prd_text)
-    cases = normalize_cases_data(parsed) if parsed else []
+    cases = _normalize_case_sources(normalize_cases_data(parsed) if parsed else [])
     return response_text, repaired_text, parsed, cases
+
+
+def _normalize_case_sources(cases: Any):
+    normalized = []
+    allowed_sources = {"PRD明确规则", "用户澄清", "知识库规则", "历史缺陷", "AI风险推理"}
+    for index, item in enumerate(normalize_cases_data(cases), start=1):
+        if not isinstance(item, dict):
+            continue
+        item.setdefault("id", f"TC_{index:03d}")
+        source = str(item.get("source") or "").strip()
+        if source not in allowed_sources:
+            source = "未标注来源"
+        item["source"] = source
+        item["source_detail"] = str(item.get("source_detail") or "模型未返回来源细节，请在评审时确认。").strip()
+        normalized.append(item)
+    return normalized
 
 
 def _case_generation_trace(cases: Any, rag_ignored: bool = False):

@@ -231,6 +231,27 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .warning-list {
   color: #92400e;
 }
+.clarification-box {
+  margin-top: 16px;
+  border-top: 1px solid #e2e8f0;
+  padding-top: 12px;
+}
+.clarification-item {
+  display: block;
+  margin: 0 0 12px;
+}
+.clarification-item span {
+  display: block;
+  color: #334155;
+  font-size: 13px;
+  line-height: 1.5;
+  margin-bottom: 6px;
+}
+.clarification-item textarea {
+  min-height: 74px;
+  resize: vertical;
+  line-height: 1.5;
+}
 
 .score-row {
   display: grid;
@@ -266,6 +287,21 @@ th { position: sticky; top: 0; background: #f8fafc; color: #475569; }
 .pill.P0 { background: #fee2e2; color: #991b1b; }
 .pill.P1 { background: #fef3c7; color: #92400e; }
 .pill.P2 { background: #dcfce7; color: #166534; }
+.source-tag {
+  display: inline-flex;
+  border-radius: 999px;
+  background: #e0f2fe;
+  color: #075985;
+  padding: 4px 8px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.source-detail {
+  margin: 6px 0 0;
+  color: #64748b;
+  line-height: 1.45;
+  font-size: 12px;
+}
 .empty { color: #94a3b8; text-align: center; padding: 28px; }
 
 .trace {

@@ -15,7 +15,7 @@ const defaultConfig = {
   visionModel: 'qwen-vl-plus',
 }
 
-const headers = ['id', 'module', 'precondition', 'step', 'expected', 'priority', 'design_strategy']
+const headers = ['id', 'module', 'precondition', 'step', 'expected', 'priority', 'design_strategy', 'source', 'source_detail']
 const headerNames = {
   id: '用例ID',
   module: '模块',
@@ -24,6 +24,8 @@ const headerNames = {
   expected: '预期结果',
   priority: '优先级',
   design_strategy: '设计策略',
+  source: '来源',
+  source_detail: '来源说明',
 }
 
 async function requestJson(url, options = {}) {
@@ -90,6 +92,7 @@ function App() {
   const [requirementAnalysis, setRequirementAnalysis] = useState(null)
   const [analysisDraft, setAnalysisDraft] = useState('')
   const [analysisConfirmed, setAnalysisConfirmed] = useState(false)
+  const [clarificationAnswers, setClarificationAnswers] = useState({})
   const [suggestedRules, setSuggestedRules] = useState([])
   const [multiAgentTrace, setMultiAgentTrace] = useState([])
   const [busy, setBusy] = useState('')
@@ -122,7 +125,7 @@ function App() {
   const progress = useMemo(() => ([
     { name: 'PRD 输入', done: Boolean(prdText.trim()) },
     { name: '需求分析', done: Boolean(requirementAnalysis) },
-    { name: '人工确认', done: analysisConfirmed },
+    { name: '澄清确认', done: analysisConfirmed },
     { name: '用例生成', done: cases.length > 0 },
     { name: '评估优化', done: Boolean(report) || trace.length > 0 },
     { name: '规则沉淀', done: suggestedRules.length > 0 },
@@ -132,6 +135,7 @@ function App() {
     setRequirementAnalysis(null)
     setAnalysisDraft('')
     setAnalysisConfirmed(false)
+    setClarificationAnswers({})
     setSuggestedRules([])
     setMultiAgentTrace([])
   }
@@ -211,6 +215,7 @@ function App() {
       setRequirementAnalysis(analysis)
       setAnalysisDraft(JSON.stringify(analysis, null, 2))
       setAnalysisConfirmed(false)
+      setClarificationAnswers({})
       setRagContext(data.ragContext || '')
       setSources(data.sources || [])
       setMultiAgentTrace(data.agentTrace || [])
@@ -226,9 +231,13 @@ function App() {
     setError('')
     try {
       const parsed = JSON.parse(analysisDraft)
+      parsed.clarification_answers = Object.entries(clarificationAnswers)
+        .filter(([, answer]) => String(answer || '').trim())
+        .map(([question, answer]) => ({ question, answer: String(answer).trim() }))
       setRequirementAnalysis(parsed)
+      setAnalysisDraft(JSON.stringify(parsed, null, 2))
       setAnalysisConfirmed(true)
-      setNotice('模块树已确认，可以生成测试用例')
+      setNotice('模块树和澄清答案已确认，可以生成测试用例')
     } catch {
       setError('需求分析 JSON 格式不正确，请修正后再确认。')
     }
@@ -518,6 +527,8 @@ function App() {
               analysis={requirementAnalysis}
               draft={analysisDraft}
               setDraft={setAnalysisDraft}
+              clarificationAnswers={clarificationAnswers}
+              setClarificationAnswers={setClarificationAnswers}
               confirmed={analysisConfirmed}
               onAnalyze={analyzeRequirement}
               onConfirm={confirmAnalysis}
@@ -617,7 +628,7 @@ function SettingsView({ config, updateConfig, resetConfig, saveConfigNow }) {
   )
 }
 
-function RequirementAnalysisPanel({ analysis, draft, setDraft, confirmed, onAnalyze, onConfirm, busy, disabled }) {
+function RequirementAnalysisPanel({ analysis, draft, setDraft, clarificationAnswers, setClarificationAnswers, confirmed, onAnalyze, onConfirm, busy, disabled }) {
   const modules = Array.isArray(analysis?.modules) ? analysis.modules : []
   const questions = Array.isArray(analysis?.missing_questions) ? analysis.missing_questions : []
   const rules = Array.isArray(analysis?.business_rules) ? analysis.business_rules : []
@@ -665,6 +676,22 @@ function RequirementAnalysisPanel({ analysis, draft, setDraft, confirmed, onAnal
 
             <h4>待确认问题</h4>
             <ul className="compact-list warning-list">{questions.map((question) => <li key={question}>{question}</li>)}</ul>
+
+            {questions.length > 0 && (
+              <div className="clarification-box">
+                <h4>澄清问题确认</h4>
+                {questions.map((question) => (
+                  <label className="clarification-item" key={question}>
+                    <span>{question}</span>
+                    <textarea
+                      value={clarificationAnswers[question] || ''}
+                      onChange={(e) => setClarificationAnswers((prev) => ({ ...prev, [question]: e.target.value }))}
+                      placeholder="填写你的确认答案；未填写的问题会作为待确认风险处理"
+                    />
+                  </label>
+                ))}
+              </div>
+            )}
           </div>
           <div className="analysis-editor">
             <label>可编辑 JSON</label>
@@ -690,7 +717,7 @@ function CasesPanel({ cases, busy }) {
       <div className="status-line">{busy ? `当前任务：${busy}` : '就绪'}</div>
       <div className="table-wrap">
         <table>
-          <thead><tr><th>用例ID</th><th>模块</th><th>操作步骤</th><th>预期结果</th><th>优先级</th></tr></thead>
+          <thead><tr><th>用例ID</th><th>模块</th><th>操作步骤</th><th>预期结果</th><th>优先级</th><th>来源</th></tr></thead>
           <tbody>
             {cases.map((item, index) => (
               <tr key={item.id || index}>
@@ -699,9 +726,13 @@ function CasesPanel({ cases, busy }) {
                 <td>{item.step || '-'}</td>
                 <td>{item.expected || '-'}</td>
                 <td><span className={`pill ${item.priority || ''}`}>{item.priority || '-'}</span></td>
+                <td>
+                  <span className="source-tag">{item.source || '未标注来源'}</span>
+                  <p className="source-detail">{item.source_detail || '-'}</p>
+                </td>
               </tr>
             ))}
-            {!cases.length && <tr><td colSpan="5" className="empty">暂无测试用例</td></tr>}
+            {!cases.length && <tr><td colSpan="6" className="empty">暂无测试用例</td></tr>}
           </tbody>
         </table>
       </div>
